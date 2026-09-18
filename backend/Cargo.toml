@@ -10,7 +10,13 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
-tower-http = { version = "0.5", features = ["cors", "fs", "trace", "timeout"] }
+tower-http = { version = "0.5", features = [
+    "cors",
+    "fs",
+    "trace",
+    "timeout",
+    "compression-gzip",
+] }
 bcrypt = "0.16"
 jsonwebtoken = "9"
 tracing = "0.1"

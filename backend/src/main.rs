@@ -14,6 +14,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use axum::Router;
 use tokio::sync::Mutex;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 use tower_http::timeout::TimeoutLayer;
@@ -122,7 +123,10 @@ async fn main() {
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::new(std::time::Duration::from_secs(30)))
         .with_state(state)
-        .fallback_service(ServeDir::new(&config.frontend_dir));
+        .fallback_service(ServeDir::new(&config.frontend_dir))
+        // 必须放在 fallback_service 之后：Router::layer 只作用于调用时已存在的路由，
+        // 否则静态资源（js/css/html）不会被压缩。
+        .layer(CompressionLayer::new());
 
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr)
