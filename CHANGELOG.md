@@ -2,6 +2,21 @@
 
 All notable changes to subnav.
 
+## [0.4.0] - 2026-10-17
+
+### Added
+- Icons are now downloaded server-side and stored in the database as `data:image/...;base64,...`; the browser no longer requests Google/DuckDuckGo favicons on every visit
+- `POST /bookmark/fetchIcons` accepts optional `ids` and returns `{total, updated, failed}`
+- One-time background migration rewrites legacy external icon URLs to local data URIs
+- Letter placeholder for bookmarks whose icon cannot be fetched
+
+### Changed
+- Saving a bookmark no longer blocks on icon fetching; localization runs in the background after save
+- Removed `extract_favicon_url()` and the browser-side DuckDuckGo fallback
+
+### Security
+- Icon fetching reuses the link checker's SSRF protection; HTML is capped at 512KB and icons at 64KB, with magic-byte image validation
+
 ## [0.3.1] - 2026-09-04
 
 ### Changed

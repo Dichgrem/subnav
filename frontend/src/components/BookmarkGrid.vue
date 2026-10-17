@@ -42,11 +42,14 @@
       >
         <div class="book-main">
           <img
-            v-if="book.icon"
+            v-if="book.icon && !failedIconSrc.has(book.icon)"
             :src="book.icon"
             class="book-icon"
-            @error="onIconError($event, book)"
+            @error="onIconError(book.icon)"
           />
+          <span v-else class="book-icon book-icon-placeholder">{{
+            iconInitial(book)
+          }}</span>
           <a :href="book.url" target="_blank" class="book-title">{{
             book.title
           }}</a>
@@ -81,20 +84,17 @@ const props = defineProps({ groups: Array, skipFirstTitle: Boolean });
 const emit = defineEmits(["dragStart", "dragEnd", "edit", "reorder"]);
 
 const dragOverId = ref(null);
+const failedIconSrc = ref(new Set());
 
-const onIconError = (e, book) => {
-  const img = e.target;
-  if (img.dataset.fallbackApplied) {
-    img.style.display = "none";
-    return;
-  }
-  img.dataset.fallbackApplied = "1";
-  try {
-    const domain = new URL(book.url).hostname;
-    img.src = `https://icons.duckduckgo.com/ip3/${domain}.ico`;
-  } catch {
-    img.style.display = "none";
-  }
+// Icons are stored as embedded base64 data URIs. If one still fails to load
+// (legacy external URL), fall back to a local letter placeholder.
+const onIconError = (src) => {
+  failedIconSrc.value.add(src);
+};
+
+const iconInitial = (book) => {
+  const text = (book.title || book.url || "?").trim();
+  return text ? text.charAt(0).toUpperCase() : "?";
 };
 
 const onDragStart = (event, book) => {
@@ -192,6 +192,17 @@ const onDropOnBook = (event, targetBook) => {
   height: 18px;
   border-radius: 3px;
   flex-shrink: 0;
+}
+.book-icon-placeholder {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(128, 128, 128, 0.18);
+  color: #999;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  user-select: none;
 }
 .book-title {
   font-weight: 500;

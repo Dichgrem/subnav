@@ -238,9 +238,10 @@ import {
   LS_DARK,
   LS_LOCALE,
   LS_EXPANDED,
+  LS_ICON_MIGRATED,
 } from "../utils/constants.js";
 import { buildTree } from "../utils/tree.js";
-import { useBookmarks } from "../composables/useBookmarks.js";
+import { useBookmarks, isExternalIcon } from "../composables/useBookmarks.js";
 import { useDragDrop } from "../composables/useDragDrop.js";
 import { useScroll } from "../composables/useScroll.js";
 import { useImportExport } from "../composables/useImportExport.js";
@@ -494,12 +495,21 @@ const toggleDarkMode = () => {
   document.body.classList.toggle("dark", darkMode.value);
 };
 
-onMounted(() => {
+onMounted(async () => {
   if (darkMode.value) {
     document.documentElement.classList.add("dark");
     document.body.classList.add("dark");
   }
-  loadData();
+  await loadData();
+
+  // One-time migration: turn legacy external favicon URLs into local data URIs.
+  if (
+    !localStorage.getItem(LS_ICON_MIGRATED) &&
+    bookList.value.some((book) => isExternalIcon(book.icon))
+  ) {
+    localStorage.setItem(LS_ICON_MIGRATED, "1");
+    fetchIcons(undefined, true);
+  }
 });
 </script>
 

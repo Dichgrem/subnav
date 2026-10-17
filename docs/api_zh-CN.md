@@ -31,7 +31,7 @@ Base URL: `http://localhost:8989`（开发）或同源（生产）
 | POST | `/bookmark/batchUpdateSort` | 用户 | 批量更新书签排序 |
 | GET | `/bookmark/export` | 用户 | 导出 HTML 文件下载 |
 | POST | `/bookmark/import` | 用户 | multipart 上传 HTML 文件导入 |
-| POST | `/bookmark/fetchIcons` | 用户 | 批量抓取书签图标 |
+| POST | `/bookmark/fetchIcons` | 用户 | 抓取图标并转存为本地 base64（可指定 `ids`） |
 | POST | `/bookmark/checkLinks` | 用户 | 启动链接检测（后台任务，24h 内复用缓存） |
 | GET | `/bookmark/checkLinks/status` | 用户 | 轮询检测进度与结果 |
 
@@ -211,9 +211,11 @@ CREATE TABLE bookmark (
 
 ### POST /bookmark/add
 
+新增或更新书签。保存本身不抓取网络图标；前端保存后会异步调用 `/bookmark/fetchIcons` 补全。
+
 **Request:**
 ```json
-{ "title": "GitHub", "url": "https://github.com", "categoryId": 1 }
+{ "title": "GitHub", "url": "https://github.com", "categoryId": 1, "icon": null }
 ```
 
 ### POST /bookmark/delete
@@ -224,7 +226,7 @@ CREATE TABLE bookmark (
 
 ### GET /bookmark/export
 
-返回 HTML 书签文件下载。
+返回 HTML 书签文件下载。图标以 `ICON="data:image/...;base64,..."` 内嵌，导入后可离线显示。
 
 ### POST /bookmark/import
 
@@ -240,6 +242,24 @@ multipart/form-data，仅需 `file` 字段。
 ```
 
 导入行为：递归解析 `<DL><DT><H3>`（分类）和 `<DT><A>`（书签），同名同父分类复用，返回新增书签数。
+
+### POST /bookmark/fetchIcons
+
+服务端抓取图标并把图片字节编码为 `data:image/...;base64,...` 写入 `bookmark.icon`，之后浏览器不再请求任何外部 favicon 服务。
+
+处理范围：`icon` 为空，或仍是 `http(s)://` 外链。单个域名在本次请求内只抓取一次。
+
+**Request（可选，不传 `ids` 表示补齐全部）：**
+```json
+{ "ids": [1, 2, 3] }
+```
+
+**Response:**
+```json
+{ "code": 200, "data": { "total": 3, "updated": 2, "failed": 1 } }
+```
+
+抓取顺序：书签页面中的 `<link rel="icon">` / `apple-touch-icon` → `/favicon.ico` → 服务端兜底 Google / DuckDuckGo。图标大小上限 64KB，仅接受图片类型；私有/回环地址受 `ALLOW_PRIVATE_URLS` 控制。
 
 ---
 

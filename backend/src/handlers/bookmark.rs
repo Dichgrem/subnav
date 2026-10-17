@@ -1,6 +1,6 @@
 use crate::auth::AuthUser;
 use crate::error::AppError;
-use crate::handlers::export::{export_as_html, extract_favicon_url};
+use crate::handlers::export::export_as_html;
 use crate::handlers::import::import_from_html;
 use crate::models::{Bookmark, Category};
 use crate::result::ApiResult;
@@ -142,44 +142,6 @@ pub async fn delete(
         rusqlite::params![req.id],
     )?;
     Ok(ApiResult::success_empty())
-}
-
-pub async fn fetch_icons(
-    State(state): State<AppState>,
-    _auth: AuthUser,
-) -> Result<ApiResult<i64>, AppError> {
-    let conn = state.db.get()?;
-    let count = fetch_missing_icons(&conn)?;
-    Ok(ApiResult::success(count))
-}
-
-fn fetch_missing_icons(conn: &rusqlite::Connection) -> Result<i64, rusqlite::Error> {
-    let mut stmt = conn.prepare("SELECT id, url FROM bookmark WHERE icon IS NULL")?;
-    let rows: Vec<(i64, String)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    if rows.is_empty() {
-        return Ok(0);
-    }
-
-    let mut updates: Vec<(String, i64)> = Vec::new();
-    for (id, url) in rows {
-        let icon = extract_favicon_url(&url).unwrap_or_default();
-        updates.push((icon, id));
-    }
-
-    let tx = conn.unchecked_transaction()?;
-    for (icon, id) in &updates {
-        tx.execute(
-            "UPDATE bookmark SET icon = ?1 WHERE id = ?2",
-            rusqlite::params![icon, id],
-        )?;
-    }
-    tx.commit()?;
-    let count = updates.iter().filter(|(icon, _)| !icon.is_empty()).count() as i64;
-
-    Ok(count)
 }
 
 pub async fn export_bookmarks(
@@ -355,23 +317,6 @@ mod tests {
 "#;
         let count = import_from_html(&conn, html).unwrap();
         assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn extract_favicon_url_standard() {
-        let result = extract_favicon_url("https://github.com");
-        assert!(result.unwrap().contains("google.com/s2/favicons"));
-    }
-
-    #[test]
-    fn extract_favicon_url_no_scheme() {
-        let result = extract_favicon_url("example.com");
-        assert!(result.unwrap().contains("https://example.com"));
-    }
-
-    #[test]
-    fn extract_favicon_url_invalid() {
-        assert!(extract_favicon_url("not a url").is_none());
     }
 
     #[test]

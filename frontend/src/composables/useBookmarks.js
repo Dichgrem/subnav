@@ -3,6 +3,10 @@ import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import request from "../utils/request.js";
 
+export const isExternalIcon = (icon) => /^https?:\/\//i.test(icon || "");
+
+const needsLocalIcon = (icon) => !icon || isExternalIcon(icon);
+
 export function useBookmarks() {
   const { t } = useI18n();
 
@@ -39,9 +43,14 @@ export function useBookmarks() {
 
   const saveEditBook = async (form) => {
     try {
-      await request.post("/bookmark/add", { ...form });
+      const res = await request.post("/bookmark/add", { ...form });
       showEditBook.value = false;
-      loadData();
+      const saved = res.data?.data;
+      await loadData();
+      // Localize the icon in the background so saving stays fast.
+      if (saved?.id && needsLocalIcon(saved.icon)) {
+        fetchIcons([saved.id], true);
+      }
     } catch {
       ElMessage.error(t("bookmark.saveFailed"));
     }
@@ -91,19 +100,43 @@ export function useBookmarks() {
     }
   };
 
-  const fetchIcons = async () => {
+  const fetchIcons = async (ids, silent = false) => {
+    const loading = silent
+      ? null
+      : ElMessage({ message: t("bookmark.fetchingIcons"), duration: 0 });
     try {
-      const res = await request.post("/bookmark/fetchIcons");
-      if (res.data.code === 200) {
-        ElMessage.success(
-          t("bookmark.fetchIconSuccess", { count: res.data.data }),
-        );
-        loadData();
-      } else {
-        ElMessage.error(res.data.msg || t("bookmark.fetchIconFailed"));
+      const res = await request.post(
+        "/bookmark/fetchIcons",
+        ids?.length ? { ids } : {},
+        { timeout: 120000 },
+      );
+      if (res.data.code !== 200) {
+        if (!silent) {
+          ElMessage.error(res.data.msg || t("bookmark.fetchIconFailed"));
+        }
+        return null;
       }
+
+      const result = res.data.data || {};
+      await loadData();
+
+      if (!silent) {
+        if (result.updated > 0) {
+          ElMessage.success(
+            t("bookmark.fetchIconSuccess", { count: result.updated }),
+          );
+        } else if (result.total === 0) {
+          ElMessage.info(t("bookmark.fetchIconNone"));
+        } else {
+          ElMessage.warning(t("bookmark.fetchIconFailed"));
+        }
+      }
+      return result;
     } catch {
-      ElMessage.error(t("bookmark.fetchIconFailed"));
+      if (!silent) ElMessage.error(t("bookmark.fetchIconFailed"));
+      return null;
+    } finally {
+      loading?.close();
     }
   };
 

@@ -36,12 +36,20 @@ Subnav 是一个前后端分离的智能书签管理系统。支持分类树管�
 
 ### backend/src/handlers/bookmark.rs
 
-书签 CRUD + 批量排序（≤1000）+ 图标抓取，同归属校验。HTML 导入导出的核心逻辑已拆分为独立模块：
+书签 CRUD + 批量排序（≤1000）。HTML 导入导出的核心逻辑已拆分为独立模块：
 
 ### backend/src/handlers/export.rs / import.rs
 
-- **export.rs**：`export_as_html()` 按分类树递归渲染 Netscape 书签 HTML；`extract_favicon_url()` 生成 Google favicon 服务 URL
+- **export.rs**：`export_as_html()` 按分类树递归渲染 Netscape 书签 HTML，图标以内嵌 base64 导出
 - **import.rs**：`import_from_html()` 行级递归解析 `<DL><DT><H3>`（分类）/ `<DT><A>`（书签），同名同父分类复用、重复 URL 跳过，返回新增书签数
+
+### backend/src/handlers/icon.rs
+
+图标本地化：
+- `fetch_icons`：筛选 `icon` 为空或仍是 `http(s)` 外链的书签，按域名去重并发抓取（并发 8、单任务总预算 8s）
+- 抓取链：页面 `<link rel="icon">` / `apple-touch-icon`（按 `sizes` 排序）→ `/favicon.ico` → 服务端兜底 Google / DuckDuckGo
+- 结果统一编码为 `data:image/...;base64,...` 写入 `bookmark.icon`，浏览器之后无需再请求外部图标服务
+- 安全：复用 `check.rs` 的 SSRF 校验；HTML ≤512KB、图标 ≤64KB；按魔数校验图片类型
 
 ### backend/src/handlers/check.rs
 

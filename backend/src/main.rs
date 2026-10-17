@@ -87,10 +87,7 @@ async fn main() {
             "/bookmark/import",
             post(handlers::bookmark::import_bookmarks),
         )
-        .route(
-            "/bookmark/fetchIcons",
-            post(handlers::bookmark::fetch_icons),
-        )
+        .route("/bookmark/fetchIcons", post(handlers::icon::fetch_icons))
         .route("/bookmark/checkLinks", post(handlers::check::check_links))
         .route(
             "/bookmark/checkLinks/status",

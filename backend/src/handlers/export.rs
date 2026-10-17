@@ -103,18 +103,3 @@ fn format_bookmark_html(sb: &mut String, bm: &Bookmark) {
         ));
     }
 }
-
-pub fn extract_favicon_url(url: &str) -> Option<String> {
-    let url_with_scheme = if url.contains("://") {
-        url.to_string()
-    } else {
-        format!("https://{}", url)
-    };
-    let parsed = url::Url::parse(&url_with_scheme).ok()?;
-    let domain = parsed.host_str()?;
-    Some(format!(
-        "https://www.google.com/s2/favicons?sz=32&domain_url={}://{}",
-        parsed.scheme(),
-        domain
-    ))
-}
