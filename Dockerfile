@@ -1,7 +1,9 @@
 FROM node:22.14-alpine AS frontend-build
 WORKDIR /app
 COPY frontend/ .
-RUN corepack enable && pnpm install && pnpm build
+RUN npm install -g pnpm@12.9.0 \
+    && pnpm install --frozen-lockfile \
+    && pnpm build
 
 FROM rust:1.97-alpine AS backend-build
 RUN apk add --no-cache musl-dev && mkdir -p /app/.local
