@@ -2,6 +2,7 @@ import { ref, computed, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import request from "../utils/request.js";
+import { isLocalIconUrl } from "./useBookmarks.js";
 
 export function useDragDrop(bookList, cateList, selectedCategoryId, loadData) {
   const { t } = useI18n();
@@ -56,6 +57,8 @@ export function useDragDrop(bookList, cateList, selectedCategoryId, loadData) {
     const sob = b.sortOrder || 0;
     a.sortOrder = sob;
     b.sortOrder = soa;
+    // shallowRef: replace the array to notify dependents of nested mutations.
+    bookList.value = [...bookList.value];
     await nextTick();
     try {
       await request.post("/bookmark/batchUpdateSort", [
@@ -91,7 +94,7 @@ export function useDragDrop(bookList, cateList, selectedCategoryId, loadData) {
             id: bookId,
             title: book.title,
             url: book.url,
-            icon: book.icon,
+            icon: isLocalIconUrl(book.icon) ? null : book.icon,
             categoryId,
             sortOrder: book.sortOrder || 0,
           });

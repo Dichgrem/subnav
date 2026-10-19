@@ -16,7 +16,7 @@ use axum::Router;
 use tokio::sync::Mutex;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
@@ -48,6 +48,19 @@ async fn main() {
     let config = config::Config::from_env();
     let (pool, jwt_secret) = db::init_db(&config.database_path);
     db::ensure_admin_user(&pool, &config.admin_username, &config.admin_password);
+
+    // Local-only cleanup: shrink oversized base64 icons stored before icons
+    // were normalized on download. No network access. Run before binding the
+    // port so the first page load never sees a half-updated icon hash set.
+    tracing::info!("normalizing stored icons");
+    let normalize_pool = pool.clone();
+    if let Err(error) = tokio::task::spawn_blocking(move || {
+        handlers::icon::normalize_existing_icons(&normalize_pool);
+    })
+    .await
+    {
+        tracing::warn!("icon normalization task failed: {error}");
+    }
 
     let state = AppState {
         db: pool,
@@ -88,10 +101,8 @@ async fn main() {
             "/bookmark/import",
             post(handlers::bookmark::import_bookmarks),
         )
-        .route(
-            "/bookmark/fetchIcons",
-            post(handlers::bookmark::fetch_icons),
-        )
+        .route("/bookmark/fetchIcons", post(handlers::icon::fetch_icons))
+        .route("/bookmark/icon/:id/:version", get(handlers::icon::get_icon))
         .route("/bookmark/checkLinks", post(handlers::check::check_links))
         .route(
             "/bookmark/checkLinks/status",
@@ -115,18 +126,24 @@ async fn main() {
             axum::http::header::CONTENT_TYPE,
         ]);
 
-    let app = Router::new()
-        .merge(auth_routes)
-        .merge(api_routes)
-        .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
-        .layer(cors)
-        .layer(TraceLayer::new_for_http())
-        .layer(TimeoutLayer::new(std::time::Duration::from_secs(30)))
-        .with_state(state)
-        .fallback_service(ServeDir::new(&config.frontend_dir))
-        // 必须放在 fallback_service 之后：Router::layer 只作用于调用时已存在的路由，
-        // 否则静态资源（js/css/html）不会被压缩。
-        .layer(CompressionLayer::new());
+    let app =
+        Router::new()
+            .merge(auth_routes)
+            .merge(api_routes)
+            .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
+            .layer(cors)
+            .layer(TraceLayer::new_for_http())
+            // Icon localization is a long-running batch (hundreds of bookmarks);
+            // keep the request alive while it works. Spawned fetch tasks also
+            // persist each icon as soon as it is ready.
+            .layer(TimeoutLayer::new(std::time::Duration::from_secs(300)))
+            .with_state(state)
+            .fallback_service(ServeDir::new(&config.frontend_dir).not_found_service(
+                ServeFile::new(format!("{}/index.html", config.frontend_dir)),
+            ))
+            // Compression must be applied after fallback_service so static assets
+            // (js/css/html) are compressed as well.
+            .layer(CompressionLayer::new());
 
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr)

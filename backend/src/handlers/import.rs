@@ -149,8 +149,9 @@ pub fn import_from_html(conn: &Connection, html: &str) -> Result<i64, AppError> 
             let url = extract_attr(trimmed, "href").unwrap_or_default();
             let title = decode_entities(&extract_inner_text(trimmed));
             let title = title.trim().to_string();
-            // ICON_URI（普通 favicon 网址）优先，省空间；没有才用 ICON（data URI）
-            let icon = extract_attr(trimmed, "icon_uri").or_else(|| extract_attr(trimmed, "icon"));
+            // 优先内嵌的 ICON（base64 data URI），可离线显示；
+            // 没有 ICON 才用 ICON_URI（外链，稍后由 fetchIcons 本地化）
+            let icon = extract_attr(trimmed, "icon").or_else(|| extract_attr(trimmed, "icon_uri"));
 
             if !url.is_empty() {
                 let category_id = stack.last().copied();
@@ -249,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn import_prefers_icon_uri() {
+    fn import_prefers_icon_base64() {
         let conn = setup_db();
         let html = r#"<dl><p>
 <dt><a href="https://x.com" ICON_URI="https://x.com/fav.ico" ICON="data:image/png;base64,AAAA">X</a>
@@ -258,6 +259,6 @@ mod tests {
         let icon: Option<String> = conn
             .query_row("SELECT icon FROM bookmark", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(icon.as_deref(), Some("https://x.com/fav.ico"));
+        assert_eq!(icon.as_deref(), Some("data:image/png;base64,AAAA"));
     }
 }

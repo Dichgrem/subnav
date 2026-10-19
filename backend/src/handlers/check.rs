@@ -415,7 +415,7 @@ fn is_private_or_local(ip: &IpAddr) -> bool {
     }
 }
 
-async fn is_blocked_url(url_str: &str, allow_private: bool) -> bool {
+pub(crate) async fn is_blocked_url(url_str: &str, allow_private: bool) -> bool {
     if allow_private {
         return false;
     }

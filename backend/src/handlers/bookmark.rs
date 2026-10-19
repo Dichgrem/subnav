@@ -1,6 +1,7 @@
 use crate::auth::AuthUser;
 use crate::error::AppError;
-use crate::handlers::export::{export_as_html, extract_favicon_url};
+use crate::handlers::export::export_as_html;
+use crate::handlers::icon::icon_version;
 use crate::handlers::import::import_from_html;
 use crate::models::{Bookmark, Category};
 use crate::result::ApiResult;
@@ -34,7 +35,7 @@ pub async fn list(
         "SELECT id, title, url, icon, category_id, sort_order
          FROM bookmark ORDER BY sort_order ASC",
     )?;
-    let bookmarks: Vec<Bookmark> = stmt
+    let mut bookmarks: Vec<Bookmark> = stmt
         .query_map([], |row| {
             Ok(Bookmark {
                 id: Some(row.get(0)?),
@@ -46,6 +47,21 @@ pub async fn list(
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
+
+    // Keep the list payload small: embedded base64 icons are served by the
+    // dedicated, long-cacheable /bookmark/icon/{id}/{hash} endpoint.
+    for bookmark in &mut bookmarks {
+        let endpoint = match (bookmark.id, bookmark.icon.as_deref()) {
+            (Some(id), Some(icon)) if icon.starts_with("data:") => {
+                Some(format!("/bookmark/icon/{id}/{}", icon_version(icon)))
+            }
+            _ => None,
+        };
+        if let Some(url) = endpoint {
+            bookmark.icon = Some(url);
+        }
+    }
+
     Ok(ApiResult::success(bookmarks))
 }
 
@@ -62,11 +78,18 @@ pub async fn add(
     if bookmark.title.len() > 500 || bookmark.url.len() > 2000 {
         return Ok(ApiResult::error("内容过长"));
     }
+    bookmark.icon = sanitize_icon(bookmark.icon);
     let conn = state.db.get()?;
 
     if let Some(id) = bookmark.id {
+        // icon = NULL keeps the existing icon (the list only exposes a short
+        // /bookmark/icon/... URL), icon = "" clears it, any other value sets it.
         conn.execute(
-            "UPDATE bookmark SET title=?1, url=?2, icon=?3, category_id=?4, sort_order=?5 WHERE id=?6",
+            "UPDATE bookmark
+             SET title=?1, url=?2,
+                 icon=CASE WHEN ?3 IS NULL THEN icon ELSE ?3 END,
+                 category_id=?4, sort_order=?5
+             WHERE id=?6",
             rusqlite::params![
                 bookmark.title,
                 bookmark.url,
@@ -76,7 +99,8 @@ pub async fn add(
                 id,
             ],
         )?;
-        Ok(ApiResult::success(bookmark))
+        let updated = load_bookmark(&conn, id)?;
+        Ok(ApiResult::success(updated))
     } else {
         conn.execute(
             "INSERT INTO bookmark (title, url, icon, category_id, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -104,6 +128,31 @@ pub async fn add(
             category_id: bookmark.category_id,
             sort_order: bookmark.sort_order,
         }))
+    }
+}
+
+fn load_bookmark(conn: &rusqlite::Connection, id: i64) -> Result<Bookmark, rusqlite::Error> {
+    conn.query_row(
+        "SELECT id, title, url, icon, category_id, sort_order FROM bookmark WHERE id = ?1",
+        [id],
+        |row| {
+            Ok(Bookmark {
+                id: Some(row.get(0)?),
+                title: row.get(1)?,
+                url: row.get(2)?,
+                icon: row.get(3)?,
+                category_id: row.get(4)?,
+                sort_order: row.get(5)?,
+            })
+        },
+    )
+}
+
+fn sanitize_icon(icon: Option<String>) -> Option<String> {
+    match icon {
+        Some(value) if value.trim().starts_with("/bookmark/icon/") => None,
+        Some(value) => Some(value.trim().to_string()),
+        None => None,
     }
 }
 
@@ -142,44 +191,6 @@ pub async fn delete(
         rusqlite::params![req.id],
     )?;
     Ok(ApiResult::success_empty())
-}
-
-pub async fn fetch_icons(
-    State(state): State<AppState>,
-    _auth: AuthUser,
-) -> Result<ApiResult<i64>, AppError> {
-    let conn = state.db.get()?;
-    let count = fetch_missing_icons(&conn)?;
-    Ok(ApiResult::success(count))
-}
-
-fn fetch_missing_icons(conn: &rusqlite::Connection) -> Result<i64, rusqlite::Error> {
-    let mut stmt = conn.prepare("SELECT id, url FROM bookmark WHERE icon IS NULL")?;
-    let rows: Vec<(i64, String)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    if rows.is_empty() {
-        return Ok(0);
-    }
-
-    let mut updates: Vec<(String, i64)> = Vec::new();
-    for (id, url) in rows {
-        let icon = extract_favicon_url(&url).unwrap_or_default();
-        updates.push((icon, id));
-    }
-
-    let tx = conn.unchecked_transaction()?;
-    for (icon, id) in &updates {
-        tx.execute(
-            "UPDATE bookmark SET icon = ?1 WHERE id = ?2",
-            rusqlite::params![icon, id],
-        )?;
-    }
-    tx.commit()?;
-    let count = updates.iter().filter(|(icon, _)| !icon.is_empty()).count() as i64;
-
-    Ok(count)
 }
 
 pub async fn export_bookmarks(
@@ -271,6 +282,17 @@ fn list_bookmarks_raw(conn: &rusqlite::Connection) -> Result<Vec<Bookmark>, rusq
 mod tests {
     use super::*;
 
+    #[test]
+    fn sanitize_icon_ignores_local_endpoint_urls() {
+        assert_eq!(sanitize_icon(Some("/bookmark/icon/1/abc".into())), None);
+        assert_eq!(
+            sanitize_icon(Some(" https://example.com/fav.ico ".into())),
+            Some("https://example.com/fav.ico".into())
+        );
+        assert_eq!(sanitize_icon(Some(String::new())), Some(String::new()));
+        assert_eq!(sanitize_icon(None), None);
+    }
+
     fn setup_db() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -355,23 +377,6 @@ mod tests {
 "#;
         let count = import_from_html(&conn, html).unwrap();
         assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn extract_favicon_url_standard() {
-        let result = extract_favicon_url("https://github.com");
-        assert!(result.unwrap().contains("google.com/s2/favicons"));
-    }
-
-    #[test]
-    fn extract_favicon_url_no_scheme() {
-        let result = extract_favicon_url("example.com");
-        assert!(result.unwrap().contains("https://example.com"));
-    }
-
-    #[test]
-    fn extract_favicon_url_invalid() {
-        assert!(extract_favicon_url("not a url").is_none());
     }
 
     #[test]

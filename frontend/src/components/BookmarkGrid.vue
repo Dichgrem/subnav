@@ -42,11 +42,16 @@
       >
         <div class="book-main">
           <img
-            v-if="book.icon"
-            :src="book.icon"
+            v-if="book.icon && !failedIconSrc.has(book.icon)"
+            :src="iconSrc(book.icon)"
             class="book-icon"
-            @error="onIconError($event, book)"
+            loading="lazy"
+            decoding="async"
+            @error="onIconError(book.icon)"
           />
+          <span v-else class="book-icon book-icon-placeholder">{{
+            iconInitial(book)
+          }}</span>
           <a :href="book.url" target="_blank" class="book-title">{{
             book.title
           }}</a>
@@ -77,24 +82,31 @@ import { useI18n } from "vue-i18n";
 
 const { t } = useI18n();
 
-const props = defineProps({ groups: Array, skipFirstTitle: Boolean });
+const props = defineProps({
+  groups: Array,
+  skipFirstTitle: Boolean,
+});
 const emit = defineEmits(["dragStart", "dragEnd", "edit", "reorder"]);
 
 const dragOverId = ref(null);
+const failedIconSrc = ref(new Set());
 
-const onIconError = (e, book) => {
-  const img = e.target;
-  if (img.dataset.fallbackApplied) {
-    img.style.display = "none";
-    return;
-  }
-  img.dataset.fallbackApplied = "1";
-  try {
-    const domain = new URL(book.url).hostname;
-    img.src = `https://icons.duckduckgo.com/ip3/${domain}.ico`;
-  } catch {
-    img.style.display = "none";
-  }
+// Icons are stored as base64 in the database, but the list only exposes a
+// short /bookmark/icon/{id}/{hash} URL. Resolve it against the API origin in
+// dev, where the frontend and backend run on different ports.
+const API_ORIGIN = import.meta.env.DEV ? "http://localhost:8989" : "";
+const iconSrc = (icon) =>
+  icon?.startsWith("/bookmark/icon/") ? `${API_ORIGIN}${icon}` : icon;
+
+// If an icon still fails to load (legacy external URL), fall back to a local
+// letter placeholder.
+const onIconError = (src) => {
+  failedIconSrc.value.add(src);
+};
+
+const iconInitial = (book) => {
+  const text = (book.title || book.url || "?").trim();
+  return text ? text.charAt(0).toUpperCase() : "?";
 };
 
 const onDragStart = (event, book) => {
@@ -192,6 +204,17 @@ const onDropOnBook = (event, targetBook) => {
   height: 18px;
   border-radius: 3px;
   flex-shrink: 0;
+}
+.book-icon-placeholder {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(128, 128, 128, 0.18);
+  color: #999;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  user-select: none;
 }
 .book-title {
   font-weight: 500;

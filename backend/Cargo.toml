@@ -1,6 +1,6 @@
 [package]
 name = "bookmark-backend"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 
 [dependencies]
@@ -19,10 +19,12 @@ tower-http = { version = "0.5", features = [
 ] }
 bcrypt = "0.16"
 jsonwebtoken = "9"
+base64 = "0.22"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.8"
 hex = "0.4"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 rusqlite_migration = "1"
 r2d2 = "0.8.10"
 r2d2_sqlite = "0.24"

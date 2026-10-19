@@ -31,7 +31,8 @@ Base URL: `http://localhost:8989`（开发）或同源（生产）
 | POST | `/bookmark/batchUpdateSort` | 用户 | 批量更新书签排序 |
 | GET | `/bookmark/export` | 用户 | 导出 HTML 文件下载 |
 | POST | `/bookmark/import` | 用户 | multipart 上传 HTML 文件导入 |
-| POST | `/bookmark/fetchIcons` | 用户 | 批量抓取书签图标 |
+| POST | `/bookmark/fetchIcons` | 用户 | 抓取图标并转存为本地 base64（可指定 `ids`） |
+| GET | `/bookmark/icon/{id}/{hash}` | 无 | 返回本地图标原始字节，`immutable` 长期缓存 |
 | POST | `/bookmark/checkLinks` | 用户 | 启动链接检测（后台任务，24h 内复用缓存） |
 | GET | `/bookmark/checkLinks/status` | 用户 | 轮询检测进度与结果 |
 
@@ -209,11 +210,28 @@ CREATE TABLE bookmark (
 
 ### GET /bookmark/list
 
+列表中的图标字段：
+
+- 已本地化的图标（数据库内为 `data:image/...;base64,...`）返回短路径 `/bookmark/icon/{id}/{hash}`，不再把 base64 内联进列表 JSON
+- 尚未本地化的外链图标原样返回 `http(s)://...`
+
+这使 1000+ 书签的列表仍保持轻量，图标由独立接口按需加载并被浏览器长期缓存。
+
 ### POST /bookmark/add
+
+新增或更新书签。保存本身不抓取网络图标；前端保存后会异步调用 `/bookmark/fetchIcons` 补全。
+
+更新时 `icon` 字段语义：
+
+- `null`：保留数据库中已有的图标
+- `""`：清除图标
+- 其他值：写入新图标（外链会被后续 `fetchIcons` 本地化）
+
+以 `/bookmark/icon/` 开头的列表返回值会被服务端视为 `null`，避免把展示路径写回数据库。
 
 **Request:**
 ```json
-{ "title": "GitHub", "url": "https://github.com", "categoryId": 1 }
+{ "title": "GitHub", "url": "https://github.com", "categoryId": 1, "icon": null }
 ```
 
 ### POST /bookmark/delete
@@ -224,7 +242,7 @@ CREATE TABLE bookmark (
 
 ### GET /bookmark/export
 
-返回 HTML 书签文件下载。
+返回 HTML 书签文件下载。图标以 `ICON="data:image/...;base64,..."` 内嵌，导入后可离线显示。
 
 ### POST /bookmark/import
 
@@ -240,6 +258,33 @@ multipart/form-data，仅需 `file` 字段。
 ```
 
 导入行为：递归解析 `<DL><DT><H3>`（分类）和 `<DT><A>`（书签），同名同父分类复用，返回新增书签数。
+
+### POST /bookmark/fetchIcons
+
+服务端抓取图标并把图片字节编码为 `data:image/...;base64,...` 写入 `bookmark.icon`，之后浏览器不再请求任何外部 favicon 服务。栅格图标会缩放到 64×64 PNG（SVG 保持原样），已有超大 base64 图标也会被重新压缩。
+
+处理范围：`icon` 为空，或仍是 `http(s)://` 外链。单个域名在本次请求内只抓取一次。
+
+**Request（可选，不传 `ids` 表示补齐全部）：**
+```json
+{ "ids": [1, 2, 3] }
+```
+
+**Response:**
+```json
+{ "code": 200, "data": { "total": 3, "updated": 2, "failed": 1 } }
+```
+
+抓取顺序：书签页面中的 `<link rel="icon">` / `apple-touch-icon` → `/favicon.ico` → 服务端兜底 Google / DuckDuckGo。图标大小上限 64KB，仅接受图片类型；私有/回环地址受 `ALLOW_PRIVATE_URLS` 控制。
+
+### GET /bookmark/icon/{id}/{hash}
+
+无需登录。读取 `bookmark.icon` 中的 base64 data URI，解码后返回原始图片字节。
+
+- `hash` 为图标内容的 FNV-1a 校验值；不匹配返回 404，避免通过枚举 id 拉取图标
+- 响应头：`Cache-Control: public, max-age=31536000, immutable`
+- 图标变化后 hash 变化，列表会返回新 URL，浏览器自然缓存失效
+- 前端 `<img>` 使用 `loading="lazy"`，只加载可视区域内的图标
 
 ---
 
