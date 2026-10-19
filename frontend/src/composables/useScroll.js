@@ -1,6 +1,6 @@
 import { ref } from "vue";
 
-export function useScroll(contentRef, selectedCategoryId) {
+export function useScroll(contentRef) {
   const showBackToTop = ref(false);
 
   const onContentScroll = () => {
@@ -11,19 +11,5 @@ export function useScroll(contentRef, selectedCategoryId) {
     contentRef.value?.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  const scrollToGroup = (cateId) => {
-    selectedCategoryId.value = cateId;
-    const el = document.getElementById(`group-${cateId}`);
-    const container = contentRef.value;
-    if (el && container) {
-      const cr = container.getBoundingClientRect();
-      const er = el.getBoundingClientRect();
-      container.scrollTo({
-        top: container.scrollTop + er.top - cr.top - 20,
-        behavior: "smooth",
-      });
-    }
-  };
-
-  return { showBackToTop, onContentScroll, scrollToTop, scrollToGroup };
+  return { showBackToTop, onContentScroll, scrollToTop };
 }

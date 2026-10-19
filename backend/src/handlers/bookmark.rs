@@ -1,6 +1,7 @@
 use crate::auth::AuthUser;
 use crate::error::AppError;
 use crate::handlers::export::export_as_html;
+use crate::handlers::icon::icon_version;
 use crate::handlers::import::import_from_html;
 use crate::models::{Bookmark, Category};
 use crate::result::ApiResult;
@@ -34,7 +35,7 @@ pub async fn list(
         "SELECT id, title, url, icon, category_id, sort_order
          FROM bookmark ORDER BY sort_order ASC",
     )?;
-    let bookmarks: Vec<Bookmark> = stmt
+    let mut bookmarks: Vec<Bookmark> = stmt
         .query_map([], |row| {
             Ok(Bookmark {
                 id: Some(row.get(0)?),
@@ -46,6 +47,21 @@ pub async fn list(
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
+
+    // Keep the list payload small: embedded base64 icons are served by the
+    // dedicated, long-cacheable /bookmark/icon/{id}/{hash} endpoint.
+    for bookmark in &mut bookmarks {
+        let endpoint = match (bookmark.id, bookmark.icon.as_deref()) {
+            (Some(id), Some(icon)) if icon.starts_with("data:") => {
+                Some(format!("/bookmark/icon/{id}/{}", icon_version(icon)))
+            }
+            _ => None,
+        };
+        if let Some(url) = endpoint {
+            bookmark.icon = Some(url);
+        }
+    }
+
     Ok(ApiResult::success(bookmarks))
 }
 
@@ -62,11 +78,18 @@ pub async fn add(
     if bookmark.title.len() > 500 || bookmark.url.len() > 2000 {
         return Ok(ApiResult::error("内容过长"));
     }
+    bookmark.icon = sanitize_icon(bookmark.icon);
     let conn = state.db.get()?;
 
     if let Some(id) = bookmark.id {
+        // icon = NULL keeps the existing icon (the list only exposes a short
+        // /bookmark/icon/... URL), icon = "" clears it, any other value sets it.
         conn.execute(
-            "UPDATE bookmark SET title=?1, url=?2, icon=?3, category_id=?4, sort_order=?5 WHERE id=?6",
+            "UPDATE bookmark
+             SET title=?1, url=?2,
+                 icon=CASE WHEN ?3 IS NULL THEN icon ELSE ?3 END,
+                 category_id=?4, sort_order=?5
+             WHERE id=?6",
             rusqlite::params![
                 bookmark.title,
                 bookmark.url,
@@ -76,7 +99,8 @@ pub async fn add(
                 id,
             ],
         )?;
-        Ok(ApiResult::success(bookmark))
+        let updated = load_bookmark(&conn, id)?;
+        Ok(ApiResult::success(updated))
     } else {
         conn.execute(
             "INSERT INTO bookmark (title, url, icon, category_id, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -104,6 +128,31 @@ pub async fn add(
             category_id: bookmark.category_id,
             sort_order: bookmark.sort_order,
         }))
+    }
+}
+
+fn load_bookmark(conn: &rusqlite::Connection, id: i64) -> Result<Bookmark, rusqlite::Error> {
+    conn.query_row(
+        "SELECT id, title, url, icon, category_id, sort_order FROM bookmark WHERE id = ?1",
+        [id],
+        |row| {
+            Ok(Bookmark {
+                id: Some(row.get(0)?),
+                title: row.get(1)?,
+                url: row.get(2)?,
+                icon: row.get(3)?,
+                category_id: row.get(4)?,
+                sort_order: row.get(5)?,
+            })
+        },
+    )
+}
+
+fn sanitize_icon(icon: Option<String>) -> Option<String> {
+    match icon {
+        Some(value) if value.trim().starts_with("/bookmark/icon/") => None,
+        Some(value) => Some(value.trim().to_string()),
+        None => None,
     }
 }
 
@@ -232,6 +281,17 @@ fn list_bookmarks_raw(conn: &rusqlite::Connection) -> Result<Vec<Bookmark>, rusq
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_icon_ignores_local_endpoint_urls() {
+        assert_eq!(sanitize_icon(Some("/bookmark/icon/1/abc".into())), None);
+        assert_eq!(
+            sanitize_icon(Some(" https://example.com/fav.ico ".into())),
+            Some("https://example.com/fav.ico".into())
+        );
+        assert_eq!(sanitize_icon(Some(String::new())), Some(String::new()));
+        assert_eq!(sanitize_icon(None), None);
+    }
 
     fn setup_db() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();

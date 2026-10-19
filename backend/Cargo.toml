@@ -18,6 +18,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.8"
 hex = "0.4"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 rusqlite_migration = "1"
 r2d2 = "0.8.10"
 r2d2_sqlite = "0.24"

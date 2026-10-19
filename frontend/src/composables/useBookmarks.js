@@ -1,17 +1,20 @@
-import { ref } from "vue";
+import { ref, shallowRef } from "vue";
 import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import request from "../utils/request.js";
 
 export const isExternalIcon = (icon) => /^https?:\/\//i.test(icon || "");
+export const isLocalIconUrl = (icon) => /^\/bookmark\/icon\//.test(icon || "");
 
 const needsLocalIcon = (icon) => !icon || isExternalIcon(icon);
 
 export function useBookmarks() {
   const { t } = useI18n();
 
-  const bookList = ref([]);
-  const cateList = ref([]);
+  // The UI replaces these arrays wholesale; deep proxies over 1000+ bookmarks
+  // are pure overhead, so keep them shallow.
+  const bookList = shallowRef([]);
+  const cateList = shallowRef([]);
 
   const showEditBook = ref(false);
   const editBook = ref({});
@@ -43,7 +46,11 @@ export function useBookmarks() {
 
   const saveEditBook = async (form) => {
     try {
-      const res = await request.post("/bookmark/add", { ...form });
+      const payload = { ...form };
+      // The list exposes a short icon endpoint URL; null keeps the existing
+      // locally stored icon, while an empty string clears it.
+      if (isLocalIconUrl(payload.icon)) payload.icon = null;
+      const res = await request.post("/bookmark/add", payload);
       showEditBook.value = false;
       const saved = res.data?.data;
       await loadData();
@@ -108,7 +115,7 @@ export function useBookmarks() {
       const res = await request.post(
         "/bookmark/fetchIcons",
         ids?.length ? { ids } : {},
-        { timeout: 120000 },
+        { timeout: 300000 },
       );
       if (res.data.code !== 200) {
         if (!silent) {
@@ -140,9 +147,9 @@ export function useBookmarks() {
     }
   };
 
-  const handleAddMenu = (type) => {
+  const handleAddMenu = (type, categoryId = null) => {
     if (type === "bookmark") {
-      editBook.value = {};
+      editBook.value = categoryId ? { categoryId } : {};
       showEditBook.value = true;
     } else {
       addCate(null);

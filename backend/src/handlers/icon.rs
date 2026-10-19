@@ -1,12 +1,17 @@
 use std::collections::HashMap;
+use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::{Path, State};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::Engine;
+use image::{ImageFormat, ImageReader};
 use reqwest::header::CONTENT_TYPE;
 use reqwest::Client;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
@@ -23,9 +28,91 @@ const MAX_PAGE_CANDIDATES: usize = 4;
 const TOTAL_TIMEOUT_SECS: u64 = 8;
 const CONCURRENCY: usize = 8;
 const MAX_ICON_IDS: usize = 2000;
+const MAX_SOURCE_ICON_DIM: u32 = 1024;
+const TARGET_ICON_DIM: u32 = 64;
+const LARGE_DATA_ICON_BYTES: usize = 8 * 1024;
 
 type IconCell = Arc<OnceCell<Option<String>>>;
 type IconCacheMap = Mutex<HashMap<String, IconCell>>;
+
+/// Serves a locally stored icon as raw image bytes.
+///
+/// The URL includes a content hash (`/bookmark/icon/{id}/{hash}`), so the
+/// response can be cached forever and a changed icon naturally gets a new URL.
+/// The hash is also checked to avoid exposing icons by enumerating bookmark ids.
+pub async fn get_icon(
+    State(state): State<AppState>,
+    Path((id, version)): Path<(i64, String)>,
+) -> Result<Response, AppError> {
+    let conn = state.db.get()?;
+    let icon: Option<String> = conn
+        .query_row("SELECT icon FROM bookmark WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .optional()?;
+
+    let Some(icon) = icon.filter(|value| value.starts_with("data:")) else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+    if icon_version(&icon) != version {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    }
+    let Some((mime, bytes)) = decode_data_uri(&icon) else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    // Stored SVGs may come from untrusted sites. The sandbox directive keeps
+    // scripts from running if the icon URL is opened directly in a browser.
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; sandbox"),
+    );
+    Ok((headers, bytes).into_response())
+}
+
+/// Stable, cheap content hash used for icon URLs (FNV-1a 64-bit).
+pub(crate) fn icon_version(icon: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in icon.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn decode_data_uri(icon: &str) -> Option<(&'static str, Vec<u8>)> {
+    let rest = icon.strip_prefix("data:")?;
+    let (meta, data) = rest.split_once(',')?;
+    let mut parts = meta.split(';');
+    let mime = parts.next()?;
+    if !parts.any(|part| part.eq_ignore_ascii_case("base64")) {
+        return None;
+    }
+    let mime = match mime.to_ascii_lowercase().as_str() {
+        "image/png" | "image/apng" => "image/png",
+        "image/jpeg" | "image/jpg" => "image/jpeg",
+        "image/gif" => "image/gif",
+        "image/webp" => "image/webp",
+        "image/bmp" => "image/bmp",
+        "image/svg+xml" => "image/svg+xml",
+        "image/x-icon" | "image/vnd.microsoft.icon" => "image/x-icon",
+        _ => return None,
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .ok()?;
+    Some((mime, bytes))
+}
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,44 +172,41 @@ pub async fn fetch_icons(
     let allow_private = state.config.allow_private_urls;
     let semaphore = Arc::new(Semaphore::new(CONCURRENCY));
     let origin_cache: Arc<IconCacheMap> = Arc::new(Mutex::new(HashMap::new()));
+    let db = state.db.clone();
 
     let mut handles = Vec::with_capacity(total);
     for target in targets {
         let client = client.clone();
         let semaphore = semaphore.clone();
         let cache = origin_cache.clone();
+        let db = db.clone();
 
         handles.push(tokio::spawn(async move {
             let _permit = semaphore.acquire().await.ok()?;
             let icon = resolve_target_icon(&client, &target, allow_private, &cache).await?;
-            Some((target.id, icon))
+
+            // Persist each icon as soon as it is fetched. Spawned tasks keep
+            // running even if the client disconnects, so partial progress is
+            // never lost on a slow batch.
+            let conn = db.get().ok()?;
+            conn.execute(
+                "UPDATE bookmark SET icon = ?1 WHERE id = ?2",
+                rusqlite::params![icon, target.id],
+            )
+            .ok()?;
+            Some(target.id)
         }));
     }
 
-    let mut updates: Vec<(i64, String)> = Vec::new();
+    let mut updated = 0;
     for handle in handles {
         match handle.await {
-            Ok(Some(pair)) => updates.push(pair),
+            Ok(Some(_)) => updated += 1,
             Ok(None) => {}
             Err(e) => tracing::warn!("icon fetch task failed: {e}"),
         }
     }
 
-    // Never hold a pooled SQLite connection across await points: collect all
-    // network results first, then write them in one transaction.
-    if !updates.is_empty() {
-        let mut conn = state.db.get()?;
-        let tx = conn.transaction()?;
-        for (id, icon) in &updates {
-            tx.execute(
-                "UPDATE bookmark SET icon = ?1 WHERE id = ?2",
-                rusqlite::params![icon, id],
-            )?;
-        }
-        tx.commit()?;
-    }
-
-    let updated = updates.len();
     tracing::info!("localized {updated}/{total} bookmark icons");
 
     Ok(ApiResult::success(FetchIconsResult {
@@ -154,7 +238,7 @@ fn load_targets(state: &AppState, ids: Option<&[i64]>) -> Result<Vec<IconTarget>
         })?;
         for row in rows {
             let target = row?;
-            if needs_icon(target.icon.as_deref()) {
+            if needs_icon(target.icon.as_deref()) || is_large_data_icon(target.icon.as_deref()) {
                 targets.push(target);
             }
         }
@@ -164,9 +248,11 @@ fn load_targets(state: &AppState, ids: Option<&[i64]>) -> Result<Vec<IconTarget>
              WHERE icon IS NULL
                 OR TRIM(icon) = ''
                 OR icon LIKE 'http://%'
-                OR icon LIKE 'https://%'",
+                OR icon LIKE 'https://%'
+                OR (icon LIKE 'data:%' AND LENGTH(icon) > ?1
+                    AND icon NOT LIKE 'data:image/svg+xml%')",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map([LARGE_DATA_ICON_BYTES], |row| {
             Ok(IconTarget {
                 id: row.get(0)?,
                 url: row.get(1)?,
@@ -190,6 +276,10 @@ async fn resolve_target_icon(
     // A manually entered external icon URL: download that exact image first.
     if let Some(icon) = target.icon.as_deref() {
         let trimmed = icon.trim();
+        if trimmed.starts_with("data:") {
+            // Large legacy base64 icons are re-encoded to a small PNG.
+            return normalize_data_icon(trimmed);
+        }
         if is_http_url(trimmed) {
             if let Some(data) = fetch_image_as_data_uri(client, trimmed, allow_private).await {
                 return Some(data);
@@ -222,6 +312,14 @@ pub(crate) fn needs_icon(icon: Option<&str>) -> bool {
             value.is_empty() || is_http_url(value)
         }
     }
+}
+
+fn is_large_data_icon(icon: Option<&str>) -> bool {
+    icon.is_some_and(|value| {
+        value.starts_with("data:")
+            && value.len() > LARGE_DATA_ICON_BYTES
+            && !value.starts_with("data:image/svg+xml")
+    })
 }
 
 fn is_http_url(value: &str) -> bool {
@@ -305,7 +403,118 @@ async fn fetch_image_as_data_uri(
         .await
         .ok()?;
     let mime = sniff_image_mime(&fetched.bytes, fetched.content_type.as_deref())?;
+    if let Some(normalized) = normalize_icon(&fetched.bytes, mime) {
+        return Some(to_data_uri("image/png", &normalized));
+    }
     Some(to_data_uri(mime, &fetched.bytes))
+}
+
+/// Re-encodes raster icons to a small PNG. Large favicons (512×512) are very
+/// expensive to decode/paint at an 18px display size and cause scroll jank.
+fn normalize_icon(bytes: &[u8], mime: &str) -> Option<Vec<u8>> {
+    if mime == "image/svg+xml" {
+        return None;
+    }
+
+    let reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let (width, height) = reader.into_dimensions().ok()?;
+    if width == 0 || height == 0 || width > MAX_SOURCE_ICON_DIM || height > MAX_SOURCE_ICON_DIM {
+        return None;
+    }
+    // Already a display-sized PNG: re-encoding would only churn its hash.
+    if mime == "image/png" && width <= TARGET_ICON_DIM && height <= TARGET_ICON_DIM {
+        return None;
+    }
+
+    let image = image::load_from_memory(bytes).ok()?;
+    let thumbnail = image.thumbnail(TARGET_ICON_DIM, TARGET_ICON_DIM);
+    let mut output = Cursor::new(Vec::new());
+    thumbnail.write_to(&mut output, ImageFormat::Png).ok()?;
+    let output = output.into_inner();
+    (output.len() < bytes.len()).then_some(output)
+}
+
+fn normalize_data_icon(icon: &str) -> Option<String> {
+    let (mime, bytes) = decode_data_uri(icon)?;
+    let normalized = normalize_icon(&bytes, mime)?;
+    let data = to_data_uri("image/png", &normalized);
+    (data.len() < icon.len()).then_some(data)
+}
+
+/// Shrinks oversized base64 icons already stored in the database.
+pub fn normalize_existing_icons(pool: &crate::db::DbPool) {
+    let conn = match pool.get() {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::warn!("failed to normalize stored icons: {error}");
+            return;
+        }
+    };
+
+    let mut statement = match conn.prepare(
+        "SELECT id, icon FROM bookmark
+         WHERE icon LIKE 'data:%' AND LENGTH(icon) > ?1
+           AND icon NOT LIKE 'data:image/svg+xml%'",
+    ) {
+        Ok(statement) => statement,
+        Err(error) => {
+            tracing::warn!("failed to query stored icons: {error}");
+            return;
+        }
+    };
+    let mapped = match statement.query_map([LARGE_DATA_ICON_BYTES], |row| {
+        Ok((row.get(0)?, row.get(1)?))
+    }) {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!("failed to scan stored icons: {error}");
+            return;
+        }
+    };
+    let rows: Vec<(i64, String)> = match mapped.collect::<Result<Vec<_>, _>>() {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!("failed to read stored icons: {error}");
+            return;
+        }
+    };
+    drop(statement);
+
+    let updates: Vec<(i64, String)> = rows
+        .iter()
+        .filter_map(|(id, icon)| normalize_data_icon(icon).map(|icon| (*id, icon)))
+        .collect();
+    if updates.is_empty() {
+        return;
+    }
+
+    let transaction = match conn.unchecked_transaction() {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            tracing::warn!("failed to start icon normalization transaction: {error}");
+            return;
+        }
+    };
+
+    let mut updated = 0;
+    for (id, icon) in &updates {
+        if transaction
+            .execute(
+                "UPDATE bookmark SET icon = ?1 WHERE id = ?2",
+                rusqlite::params![icon, id],
+            )
+            .is_ok()
+        {
+            updated += 1;
+        }
+    }
+
+    match transaction.commit() {
+        Ok(()) => tracing::info!("normalized {updated} stored icons"),
+        Err(error) => tracing::warn!("failed to commit icon normalization: {error}"),
+    }
 }
 
 async fn get_capped(
@@ -723,6 +932,59 @@ mod tests {
             to_data_uri("image/png", b"abc"),
             "data:image/png;base64,YWJj"
         );
+    }
+
+    #[test]
+    fn decodes_data_uri_roundtrip() {
+        let icon = to_data_uri("image/png", b"abc");
+        let (mime, bytes) = decode_data_uri(&icon).unwrap();
+        assert_eq!(mime, "image/png");
+        assert_eq!(bytes, b"abc");
+
+        assert!(decode_data_uri("https://example.com/fav.ico").is_none());
+        assert!(decode_data_uri("data:text/plain;base64,YWJj").is_none());
+        assert!(decode_data_uri("data:image/png,YWJj").is_none());
+        assert!(decode_data_uri("data:image/png;base64,!!!").is_none());
+    }
+
+    #[test]
+    fn icon_version_is_stable_and_content_sensitive() {
+        assert_eq!(icon_version("abc"), icon_version("abc"));
+        assert_ne!(icon_version("abc"), icon_version("abd"));
+        assert_eq!(icon_version("abc").len(), 16);
+    }
+
+    #[test]
+    fn normalizes_large_raster_icons() {
+        use std::io::Cursor;
+
+        let mut image = image::RgbaImage::new(512, 512);
+        for (x, y, pixel) in image.enumerate_pixels_mut() {
+            *pixel = image::Rgba([
+                (x % 256) as u8,
+                (y % 256) as u8,
+                ((x * 7 + y * 13) % 256) as u8,
+                255,
+            ]);
+        }
+        let mut source = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut source, ImageFormat::Png)
+            .unwrap();
+        let bytes = source.into_inner();
+
+        let normalized = normalize_icon(&bytes, "image/png").unwrap();
+        assert!(normalized.len() < bytes.len());
+        let decoded = image::load_from_memory(&normalized).unwrap();
+        assert!(decoded.width() <= TARGET_ICON_DIM);
+        assert!(decoded.height() <= TARGET_ICON_DIM);
+
+        let data = to_data_uri("image/png", &bytes);
+        let normalized_data = normalize_data_icon(&data).unwrap();
+        assert!(normalized_data.starts_with("data:image/png;base64,"));
+        assert!(normalized_data.len() < data.len());
+
+        assert!(normalize_icon(b"<svg></svg>", "image/svg+xml").is_none());
     }
 
     #[test]

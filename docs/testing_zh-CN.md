@@ -12,10 +12,10 @@ just test-frontend   # 仅前端：pnpm test
 
 | 端 | 框架 | 说明 |
 |----|------|------|
-| 后端 | Rust 内置 `#[test]` | 29 个单元测试，零额外依赖 |
+| 后端 | Rust 内置 `#[test]` | 33 个单元测试，零额外依赖 |
 | 前端 | Vitest 4 + @vue/test-utils + happy-dom | 14 个单元测试，浏览器环境模拟 |
 
-## 后端测试（29 个）
+## 后端测试（33 个）
 
 位于 `backend/src/` 各模块内，以 `#[cfg(test)] mod tests` 内联。
 
@@ -34,7 +34,7 @@ just test-frontend   # 仅前端：pnpm test
 | `collect_single_category` | 单层分类，仅收集自身 id |
 | `collect_nested_categories` | 嵌套分类树（3 层），收集自身 + 所有子孙 id |
 
-### handlers/bookmark.rs（5 个）
+### handlers/bookmark.rs（6 个）
 
 HTML 导入导出逻辑虽已拆至 `handlers/import.rs` / `handlers/export.rs`，但相关测试仍集中在 bookmark.rs 的测试模块中。
 
@@ -45,8 +45,9 @@ HTML 导入导出逻辑虽已拆至 `handlers/import.rs` / `handlers/export.rs`�
 | `import_duplicate_url_skipped` | 已存在 URL 跳过（不重复导入） |
 | `list_bookmarks_ordered_by_sort` | 多书签查询不报错（排序由 handler SQL 负责） |
 | `export_as_html_includes_all` | 导出 HTML 包含分类与书签 |
+| `sanitize_icon_ignores_local_endpoint_urls` | 列表图标路径不会被写回数据库 |
 
-### handlers/icon.rs（10 个）
+### handlers/icon.rs（13 个）
 
 | 测试 | 说明 |
 |------|------|
@@ -60,6 +61,9 @@ HTML 导入导出逻辑虽已拆至 `handlers/import.rs` / `handlers/export.rs`�
 | `normalizes_urls` | 无协议 URL 补全、非法协议拒绝 |
 | `needs_icon_detects_missing_and_external_values` | 空图标/外链图标判定 |
 | `fetches_icon_from_local_page` | 本地 axum 服务端到端抓取页面图标 |
+| `decodes_data_uri_roundtrip` | base64 data URI 解码，拒绝非图片/非 base64 |
+| `icon_version_is_stable_and_content_sensitive` | 图标 URL 内容哈希稳定且随内容变化 |
+| `normalizes_large_raster_icons` | 512×512 图标压缩为 64×64 PNG，SVG 保持原样 |
 
 ## 前端测试（14 个）
 

@@ -43,8 +43,10 @@
         <div class="book-main">
           <img
             v-if="book.icon && !failedIconSrc.has(book.icon)"
-            :src="book.icon"
+            :src="iconSrc(book.icon)"
             class="book-icon"
+            loading="lazy"
+            decoding="async"
             @error="onIconError(book.icon)"
           />
           <span v-else class="book-icon book-icon-placeholder">{{
@@ -80,14 +82,24 @@ import { useI18n } from "vue-i18n";
 
 const { t } = useI18n();
 
-const props = defineProps({ groups: Array, skipFirstTitle: Boolean });
+const props = defineProps({
+  groups: Array,
+  skipFirstTitle: Boolean,
+});
 const emit = defineEmits(["dragStart", "dragEnd", "edit", "reorder"]);
 
 const dragOverId = ref(null);
 const failedIconSrc = ref(new Set());
 
-// Icons are stored as embedded base64 data URIs. If one still fails to load
-// (legacy external URL), fall back to a local letter placeholder.
+// Icons are stored as base64 in the database, but the list only exposes a
+// short /bookmark/icon/{id}/{hash} URL. Resolve it against the API origin in
+// dev, where the frontend and backend run on different ports.
+const API_ORIGIN = import.meta.env.DEV ? "http://localhost:8989" : "";
+const iconSrc = (icon) =>
+  icon?.startsWith("/bookmark/icon/") ? `${API_ORIGIN}${icon}` : icon;
+
+// If an icon still fails to load (legacy external URL), fall back to a local
+// letter placeholder.
 const onIconError = (src) => {
   failedIconSrc.value.add(src);
 };

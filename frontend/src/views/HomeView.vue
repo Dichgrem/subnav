@@ -8,10 +8,10 @@
         :drag-hover-id="dragHoverCategoryId"
         :eating-id="eatingCategoryId"
         :dark-mode="darkMode"
-        @select="scrollToGroup"
+        @select="handleSelectCategory"
         @command="handleCommand"
         @logout="logout"
-        @add-menu="handleAddMenu"
+        @add-menu="handleAddMenuWithContext"
         @toggle-dark="toggleDarkMode"
         @add-sub="openAddSubCate"
         @edit-cate="openEditCate"
@@ -34,13 +34,13 @@
         @drop-bookmark="(e, id) => onDrop(e, id)"
       />
 
-      <main class="content" ref="contentRef" @scroll="onContentScroll">
+      <main class="content" ref="contentRef" @scroll="handleContentScroll">
         <div class="header-row">
-          <h2 class="header-title">{{ firstGroupTitle }}</h2>
+          <h2 class="header-title">{{ headerTitle }}</h2>
           <SearchBar v-model="searchQuery" />
         </div>
         <BookmarkGrid
-          :groups="groupedBookmarks"
+          :groups="visibleGroups"
           :skip-first-title="true"
           @edit="openEditBook"
           @drag-start="onDragStart"
@@ -227,7 +227,14 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from "vue";
+import {
+  ref,
+  computed,
+  onMounted,
+  onBeforeUnmount,
+  nextTick,
+  watch,
+} from "vue";
 import { useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
@@ -238,10 +245,9 @@ import {
   LS_DARK,
   LS_LOCALE,
   LS_EXPANDED,
-  LS_ICON_MIGRATED,
 } from "../utils/constants.js";
 import { buildTree } from "../utils/tree.js";
-import { useBookmarks, isExternalIcon } from "../composables/useBookmarks.js";
+import { useBookmarks } from "../composables/useBookmarks.js";
 import { useDragDrop } from "../composables/useDragDrop.js";
 import { useScroll } from "../composables/useScroll.js";
 import { useImportExport } from "../composables/useImportExport.js";
@@ -289,6 +295,15 @@ const selectedCategoryId = ref(null);
 const sidebarCollapsed = ref(false);
 const searchQuery = ref("");
 
+// Render groups incrementally: 1291 bookmarks across hundreds of categories
+// would otherwise create thousands of DOM nodes at once.
+const INITIAL_GROUPS = 15;
+const GROUP_STEP = 10;
+const visibleGroupCount = ref(INITIAL_GROUPS);
+// Sidebar clicks jump to a category, but the list stays continuous: we simply
+// start rendering at that group and keep loading subsequent groups on scroll.
+const startGroupIndex = ref(0);
+
 const {
   isDraggingBookmark,
   isDraggingCategory,
@@ -321,8 +336,7 @@ const visibleCateList = computed(() =>
 const cateTree = computed(() => buildTree(visibleCateList.value));
 
 const contentRef = ref(null);
-const { showBackToTop, onContentScroll, scrollToTop, scrollToGroup } =
-  useScroll(contentRef, selectedCategoryId);
+const { showBackToTop, onContentScroll, scrollToTop } = useScroll(contentRef);
 
 const handleNodeDrop = async () => {
   const flatUpdates = [];
@@ -479,6 +493,124 @@ const firstGroupTitle = computed(
   () => groupedBookmarks.value[0]?.categoryName || "",
 );
 
+const headerTitle = computed(() => {
+  if (selectedCategoryId.value == null) return firstGroupTitle.value;
+  const selected = visibleCateList.value.find(
+    (category) => category.id === selectedCategoryId.value,
+  );
+  return selected?.name || firstGroupTitle.value;
+});
+
+const effectiveStart = computed(() => {
+  const maxStart = Math.max(0, groupedBookmarks.value.length - 1);
+  return Math.min(startGroupIndex.value, maxStart);
+});
+
+const visibleGroups = computed(() => {
+  // Search results are usually much smaller; show every matching group so a
+  // hit in a later category is never hidden behind the render limit.
+  if (searchQuery.value.trim()) return groupedBookmarks.value;
+  return groupedBookmarks.value.slice(
+    effectiveStart.value,
+    effectiveStart.value + visibleGroupCount.value,
+  );
+});
+
+const hasMoreGroups = computed(
+  () =>
+    !searchQuery.value.trim() &&
+    effectiveStart.value + visibleGroupCount.value <
+      groupedBookmarks.value.length,
+);
+
+const loadingMore = ref(false);
+let pendingAppend = null;
+
+const fillViewport = () => {
+  const container = contentRef.value;
+  if (!container || !hasMoreGroups.value || loadingMore.value) return;
+  const distanceToBottom =
+    container.scrollHeight - container.scrollTop - container.clientHeight;
+  if (distanceToBottom < 600) {
+    scheduleAppend();
+  }
+};
+
+const scheduleAppend = () => {
+  if (!hasMoreGroups.value || loadingMore.value) return;
+  loadingMore.value = true;
+  pendingAppend = setTimeout(() => {
+    pendingAppend = null;
+    visibleGroupCount.value += GROUP_STEP;
+    nextTick(() => {
+      loadingMore.value = false;
+      fillViewport();
+    });
+  }, 0);
+};
+
+const cancelPendingAppend = () => {
+  if (pendingAppend) {
+    clearTimeout(pendingAppend);
+    pendingAppend = null;
+  }
+  loadingMore.value = false;
+};
+
+let scrollIdleTimer;
+const handleContentScroll = (event) => {
+  onContentScroll(event);
+  // Wait until the user pauses scrolling before appending the next chunk;
+  // rendering during an active scroll is what causes dropped frames.
+  clearTimeout(scrollIdleTimer);
+  scrollIdleTimer = setTimeout(fillViewport, 140);
+};
+
+onBeforeUnmount(() => {
+  clearTimeout(scrollIdleTimer);
+  cancelPendingAppend();
+});
+
+const handleSelectCategory = (cateId) => {
+  cancelPendingAppend();
+  if (searchQuery.value) searchQuery.value = "";
+  const isSame = selectedCategoryId.value === cateId;
+  selectedCategoryId.value = isSame ? null : cateId;
+  nextTick(() => {
+    if (isSame) {
+      startGroupIndex.value = 0;
+    } else {
+      const index = groupedBookmarks.value.findIndex(
+        (group) => group.categoryId === cateId,
+      );
+      startGroupIndex.value = index >= 0 ? index : 0;
+    }
+    visibleGroupCount.value = INITIAL_GROUPS;
+    if (contentRef.value) contentRef.value.scrollTop = 0;
+    nextTick(fillViewport);
+  });
+};
+
+const handleAddMenuWithContext = (type) => {
+  handleAddMenu(type, selectedCategoryId.value);
+};
+
+watch(selectedCategoryId, (value) => {
+  if (value == null) {
+    startGroupIndex.value = 0;
+    visibleGroupCount.value = INITIAL_GROUPS;
+    nextTick(fillViewport);
+  }
+});
+
+watch([bookList, cateList, searchQuery], () => {
+  if (searchQuery.value.trim()) {
+    startGroupIndex.value = 0;
+    selectedCategoryId.value = null;
+  }
+  nextTick(fillViewport);
+});
+
 const logout = () => {
   pendingDeletes.value.forEach((d) => clearTimeout(d.timer));
   pendingDeletes.value = [];
@@ -501,15 +633,8 @@ onMounted(async () => {
     document.body.classList.add("dark");
   }
   await loadData();
-
-  // One-time migration: turn legacy external favicon URLs into local data URIs.
-  if (
-    !localStorage.getItem(LS_ICON_MIGRATED) &&
-    bookList.value.some((book) => isExternalIcon(book.icon))
-  ) {
-    localStorage.setItem(LS_ICON_MIGRATED, "1");
-    fetchIcons(undefined, true);
-  }
+  await nextTick();
+  fillViewport();
 });
 </script>
 

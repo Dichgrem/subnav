@@ -6,13 +6,23 @@ All notable changes to subnav.
 
 ### Added
 - Icons are now downloaded server-side and stored in the database as `data:image/...;base64,...`; the browser no longer requests Google/DuckDuckGo favicons on every visit
+- The bookmark list no longer embeds base64 icons: local icons are served from `GET /bookmark/icon/{id}/{hash}` with a one-year immutable cache, keeping large lists fast
+- Icon images use lazy loading, so only visible cards fetch/decode icons
 - `POST /bookmark/fetchIcons` accepts optional `ids` and returns `{total, updated, failed}`
-- One-time background migration rewrites legacy external icon URLs to local data URIs
+- The "Fetch Missing Icons" menu action rewrites legacy external icon URLs to local data URIs; it no longer runs automatically on page load, avoiding a large background batch on every visit
+- Bookmark groups render 15 at a time; scrolling near the bottom loads 10 more automatically, so 1000+ bookmarks no longer create thousands of DOM nodes at once
+- Clicking a sidebar category jumps the continuous list to that group; scrolling continues into subsequent groups, and clicking the active category again returns to the start
+- Fetched raster icons are normalized to 64×64 PNG; existing oversized base64 icons are shrunk in a background task on server startup
 - Letter placeholder for bookmarks whose icon cannot be fetched
 
 ### Changed
 - Saving a bookmark no longer blocks on icon fetching; localization runs in the background after save
 - Removed `extract_favicon_url()` and the browser-side DuckDuckGo fallback
+- Bookmark/category arrays use shallow reactivity; drag reorder explicitly refreshes the list
+
+### Fixed
+- Removed `content-visibility` placeholders that made scrolled-away content jump or disappear
+- Direct navigation or refresh on an SPA route such as `/login` now serves `index.html` instead of 404
 
 ### Security
 - Icon fetching reuses the link checker's SSRF protection; HTML is capped at 512KB and icons at 64KB, with magic-byte image validation
